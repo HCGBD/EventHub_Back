@@ -116,38 +116,57 @@ export const getLocationById = async (req, res) => {
     }
 };
 
-// @desc    Update a location
-// @route   PUT /api/locations/:id
-// @access  Organizer (own location) / Admin (any location)
+import cloudinary from '../configs/cloudinary.js';
+
+// Helper function to upload a buffer to Cloudinary
+const uploadToCloudinary = (buffer) => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: 'auto' },
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      }
+    );
+    stream.end(buffer);
+  });
+};
+
+// @desc    Create a new location
+// @route   POST /api/locations
+// @access  Organizer or Admin
 export const createLocation = async (req, res) => {
     try {
-        let { name, description, address, coordinates } = req.body; // Utiliser let pour pouvoir modifier coordinates
-        const createdBy = req.user.id; // User ID from auth middleware
+        let { name, description, address, coordinates } = req.body;
+        const createdBy = req.user.id;
 
         const existingLocation = await Location.findOne({ name, deleted: false });
         if (existingLocation) {
             return res.status(400).json({ message: 'Un lieu avec ce nom existe déjà.' });
         }
 
-        console.log("entre dans createLocation");
-        
-
-        // Si coordinates est une chaîne JSON, la parser en objet
         if (typeof coordinates === 'string') {
             coordinates = JSON.parse(coordinates);
         }
 
-        // Get image paths from req.files
-        const images = req.files ? req.files.map(file => 'uploads/' + file.filename) : [];
+        let imageUrls = [];
+        if (req.files && req.files.length > 0) {
+            const uploadPromises = req.files.map(file => uploadToCloudinary(file.buffer));
+            const uploadResults = await Promise.all(uploadPromises);
+            imageUrls = uploadResults.map(result => result.secure_url);
+        }
 
         const location = new Location({
             name,
             description,
             address,
             coordinates,
-            images,
+            images: imageUrls,
             createdBy,
-            status: 'en_attente', // Default status for new locations
+            status: 'en_attente',
         });
 
         const createdLocation = await location.save();
@@ -162,47 +181,44 @@ export const createLocation = async (req, res) => {
 // @access  Organizer (own location) / Admin (any location)
 export const updateLocation = async (req, res) => {
     try {
-        let { name, description, address, coordinates, imagesToDelete } = req.body; // Utiliser let pour pouvoir modifier coordinates
+        let { name, description, address, coordinates, imagesToDelete } = req.body;
         const location = await Location.findById(req.params.id);
 
-        // Si coordinates est une chaîne JSON, la parser en objet
+        if (!location) {
+            return res.status(404).json({ message: 'Lieu non trouvé' });
+        }
+
+        if (req.user.role !== 'admin' && location.createdBy.toString() !== req.user.id) {
+            return res.status(403).json({ message: 'Non autorisé à modifier ce lieu' });
+        }
+
         if (typeof coordinates === 'string') {
             coordinates = JSON.parse(coordinates);
         }
 
-        if (location) {
-            // Check if user is admin or the creator of the location
-            if (req.user.role !== 'admin' && location.createdBy.toString() !== req.user.id) {
-                return res.status(403).json({ message: 'Non autorisé à modifier ce lieu' });
-            }
+        location.name = name || location.name;
+        location.description = description || location.description;
+        location.address = address || location.address;
+        location.coordinates = coordinates || location.coordinates;
 
-            location.name = name || location.name;
-            location.description = description || location.description;
-            location.address = address || location.address;
-            location.coordinates = coordinates || location.coordinates;
+        let currentImages = location.images || [];
 
-            let currentImages = location.images || []; // Get current images
-
-            // Handle images to delete
-            if (imagesToDelete) {
-                const imagesToDeleteArray = JSON.parse(imagesToDelete); // Parse the JSON string
-                currentImages = currentImages.filter(img => !imagesToDeleteArray.includes(img));
-                // TODO: Physically delete files from 'uploads' directory if needed
-            }
-
-            // Handle new image uploads
-            if (req.files && req.files.length > 0) {
-                const newImages = req.files.map(file => 'uploads/' + file.filename);
-                currentImages = [...currentImages, ...newImages]; // Add new images to existing ones
-            }
-
-            location.images = currentImages; // Assign the updated image array
-
-            const updatedLocation = await location.save();
-            res.json(updatedLocation);
-        } else {
-            res.status(404).json({ message: 'Lieu non trouvé' });
+        if (imagesToDelete) {
+            const imagesToDeleteArray = JSON.parse(imagesToDelete);
+            currentImages = currentImages.filter(img => !imagesToDeleteArray.includes(img));
         }
+
+        if (req.files && req.files.length > 0) {
+            const uploadPromises = req.files.map(file => uploadToCloudinary(file.buffer));
+            const uploadResults = await Promise.all(uploadPromises);
+            const newImageUrls = uploadResults.map(result => result.secure_url);
+            currentImages = [...currentImages, ...newImageUrls];
+        }
+
+        location.images = currentImages;
+
+        const updatedLocation = await location.save();
+        res.json(updatedLocation);
     } catch (err) {
         res.status(400).json({ message: 'Erreur lors de la mise à jour du lieu', error: err.message });
     }

@@ -1,5 +1,23 @@
 import Event from '../models/Event.js';
 import { sendEmail } from '../services/emailService.js';
+import cloudinary from '../configs/cloudinary.js';
+
+// Helper function to upload a buffer to Cloudinary
+const uploadToCloudinary = (buffer) => {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { resource_type: 'auto' },
+      (error, result) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(result);
+        }
+      }
+    );
+    stream.end(buffer);
+  });
+};
 
 import Ticket from '../models/Ticket.js';
 
@@ -23,8 +41,12 @@ export const createEvent = async (req, res) => {
 
         const organizer = req.user.id; // From requireAuth middleware
 
-        // Get image paths from multer
-        const images = req.files ? req.files.map(file => 'uploads/' + file.filename) : [];
+        let imageUrls = [];
+        if (req.files && req.files.length > 0) {
+            const uploadPromises = req.files.map(file => uploadToCloudinary(file.buffer));
+            const uploadResults = await Promise.all(uploadPromises);
+            imageUrls = uploadResults.map(result => result.secure_url);
+        }
 
         const event = new Event({
             name,
@@ -36,7 +58,7 @@ export const createEvent = async (req, res) => {
             price,
             maxParticipants,
             organizer,
-            images,
+            images: imageUrls,
             isOnline,
             onlineUrl
             // status will default to 'brouillon' as per the model
@@ -267,15 +289,16 @@ export const updateEvent = async (req, res) => {
 
         // Handle images to delete
         if (imagesToDelete) {
-            const imagesToDeleteArray = JSON.parse(imagesToDelete); // Parse the JSON string
+            const imagesToDeleteArray = JSON.parse(imagesToDelete);
             currentImages = currentImages.filter(img => !imagesToDeleteArray.includes(img));
-            // TODO: Physically delete files from 'uploads' directory if needed
         }
 
         // Handle new image uploads
         if (req.files && req.files.length > 0) {
-            const newImages = req.files.map(file => 'uploads/' + file.filename);
-            currentImages = [...currentImages, ...newImages];
+            const uploadPromises = req.files.map(file => uploadToCloudinary(file.buffer));
+            const uploadResults = await Promise.all(uploadPromises);
+            const newImageUrls = uploadResults.map(result => result.secure_url);
+            currentImages = [...currentImages, ...newImageUrls];
         }
 
         event.images = currentImages; // Assign the updated image array
